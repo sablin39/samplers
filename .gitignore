@@ -220,6 +220,8 @@ __marimo__/
 .claude
 .codex
 .vscode
+.agents
+
 AGENTS.md
 CLAUDE.md
 papers
