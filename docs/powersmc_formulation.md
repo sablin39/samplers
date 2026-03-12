@@ -1,16 +1,23 @@
 # Power-SMC formulation and implementation notes
 
-This note translates the formulation in `papers/2602.10273/iclr2026_conference.tex` into the implementation in this repository. The goal is to make the code easy to audit against the paper rather than to restate the paper at a high level.
+This note translates the formulation in `arxiv.org/abs/2602.10273` into the implementation in this repository. The goal is to make the code easy to audit against the paper rather than to restate the paper at a high level.
 
 ## 1. Target distribution
 
-For a prompt `x`, the paper defines the sequence-level power target
+For a prompt $x$, the paper defines the sequence-level power target
 
-`π_α(y | x) ∝ p_θ(y | x)^α`, with `α ≥ 1`.
+$$
+\begin{aligned}
+\pi_\alpha(y \mid x) &\propto p_\theta(y \mid x)^\alpha, \\
+\alpha &\ge 1.
+\end{aligned}
+$$
 
 Using the autoregressive factorization,
 
-`p_θ(y | x) = ∏_t p_θ(y_t | x, y_<t)`.
+$$
+p_\theta(y \mid x) = \prod_{t=1}^{|y|} p_\theta(y_t \mid x, y_{<t}).
+$$
 
 The key point is that this is a sequence-level transformation. It is not the same as applying temperature token by token and then multiplying the resulting token probabilities. The implementation therefore keeps a proposal distribution and a separate importance-weight correction.
 
@@ -18,12 +25,14 @@ The key point is that this is a sequence-level transformation. It is not the sam
 
 The paper introduces the prefix targets
 
-`γ_t(y_1:t | x) = p_θ(y_1:t | x)^α`.
+$$
+\gamma_t(y_{1:t} \mid x) = p_\theta(y_{1:t} \mid x)^\alpha.
+$$
 
-This produces a standard Sequential Monte Carlo flow over prefixes. In code, the state of one particle at time `t` is represented by:
+This produces a standard Sequential Monte Carlo flow over prefixes. In code, the state of one particle at time $t$ is represented by:
 
 - the generated token prefix,
-- the cumulative base-model log probability `log p_θ(y_1:t | x)`,
+- the cumulative base-model log probability $\log p_\theta(y_{1:t} \mid x)$,
 - the cumulative log importance weight,
 - a termination flag indicating whether EOS has already been emitted.
 
@@ -31,33 +40,49 @@ These quantities are maintained inside `samplers/power_smc.py`.
 
 ## 3. Proposal and exact incremental correction
 
-For a generic prefix-only proposal `q_t(· | x, y_<t)`, the paper derives the exact incremental importance weight
+For a generic prefix-only proposal $q_t(\cdot \mid x, y_{<t})$, the paper derives the exact incremental importance weight
 
-`ω_t = p_θ(y_t | x, y_<t)^α / q_t(y_t | x, y_<t)`.
+$$
+\omega_t
+= \frac{p_\theta(y_t \mid x, y_{<t})^\alpha}{q_t(y_t \mid x, y_{<t})}.
+$$
 
 The implementation uses log-space updates for stability:
 
-`log ω_t = α log p_θ(y_t | x, y_<t) - log q_t(y_t | x, y_<t)`.
+$$
+\log \omega_t
+= \alpha \, \log p_\theta(y_t \mid x, y_{<t})
+   - \log q_t(y_t \mid x, y_{<t}).
+$$
 
 Concretely, in `PowerSMCSampler.generate`:
 
-- `base_log_probs = log_softmax(logits)` computes `log p_θ(· | x, y_<t)`.
-- `proposal_log_probs = log_softmax(alpha * logits)` computes the locally optimal proposal `q_t`.
+- `base_log_probs = log_softmax(logits)` computes $\log p_\theta(\cdot \mid x, y_{<t})$.
+- `proposal_log_probs = log_softmax(alpha * logits)` computes the locally optimal proposal $q_t$.
 - the sampled token contributes `alpha * chosen_base_log_prob - chosen_proposal_log_prob` to the particle log weight.
 
 This exactly matches Equation (9) in the paper when written in log space.
 
-## 4. Why the proposal uses temperature `τ = 1 / α`
+## 4. Why the proposal uses temperature $\tau = 1 / \alpha$
 
 The theory section proves that among all proposals that depend only on the current prefix, the unique proposal minimizing conditional incremental-weight variance is
 
-`q_t*(v | x, y_<t) ∝ p_θ(v | x, y_<t)^α`.
+$$
+q_t^{\star}(v \mid x, y_{<t})
+\propto p_\theta(v \mid x, y_{<t})^\alpha.
+$$
 
-Because `p_θ = softmax(logits)`, this is equivalent to sampling from `softmax(α · logits)`, i.e. temperature `τ = 1 / α`.
+Because
+$p_\theta(\cdot \mid x, y_{<t}) = \operatorname{softmax}(\texttt{logits})$,
+this is equivalent to sampling from
+$\operatorname{softmax}(\alpha \cdot \texttt{logits})$,
+i.e. temperature $\tau = \alpha^{-1}$.
 
 The implementation follows this result literally. It does not use the base model distribution as the Power-SMC proposal. Instead, it samples each active particle from
 
-`proposal_log_probs = log_softmax(alpha_step * logits)`.
+$$
+\texttt{proposal\_log\_probs} = \log \operatorname{softmax}(\alpha_{\text{step}} \cdot \texttt{logits}).
+$$
 
 This is the locally optimal proposal from the paper, while the importance weights recover the exact sequence-level target.
 
@@ -66,8 +91,8 @@ This is the locally optimal proposal from the paper, while the importance weight
 The paper uses standard SIR-style resampling when weights collapse. The implementation does the same:
 
 1. normalize particle log weights with a log-softmax-style shift,
-2. compute `ESS = 1 / Σ_i W_i²`,
-3. trigger resampling when `ESS < κN`,
+2. compute $\operatorname{ESS}(W) = \left(\sum_i W_i^2\right)^{-1}$,
+3. trigger resampling when $\operatorname{ESS}(W) < \kappa N$,
 4. use systematic resampling to produce ancestor indices,
 5. copy particle ancestry and reset log weights.
 
@@ -113,33 +138,41 @@ This preserves the absorbing-state semantics at the sequence level, while still 
 
 The final text is decoded only from tokens before the first EOS, via `BaseSampler.trim_after_eos`.
 
-## 8. Exact exponent bridging (`α`-ramping)
+## 8. Exact exponent bridging ($\alpha$-ramping)
 
 The paper introduces intermediate exponents
 
-`1 = α^(0) < α^(1) < … < α^(L) = α`
+$$
+1 = \alpha^{(0)} < \alpha^{(1)} < \cdots < \alpha^{(L)} = \alpha.
+$$
 
 to improve particle stability without changing the final target. The implementation exposes this through `ramp_steps`.
 
 The schedule built by `PowerSMCSampler.build_alpha_schedule` is:
 
-- constant `α` when `ramp_steps = 0`,
-- linear from `1` to `α` over the first `ramp_steps` decode steps otherwise.
+- constant $\alpha$ when `ramp_steps = 0`,
+- linear from $1$ to $\alpha$ over the first `ramp_steps` decode steps otherwise.
 
 The implementation uses the following exact accounting:
 
-- the proposal at decode step `t` uses the previous stage exponent,
+- the proposal at decode step $t$ uses the previous stage exponent,
 - after sampling the token, a bridge update
-  `Δ log W = (α_t - α_{t-1}) log p_θ(y_1:t | x)`
-  is added.
 
-This matches the appendix derivation and ensures that the final particle weights still target the same `π_α`.
+$$
+\Delta \log W_t
+= \left(\alpha_t - \alpha_{t-1}\right)
+   \log p_\theta(y_{1:t} \mid x).
+$$
+
+is added.
+
+This matches the appendix derivation and ensures that the final particle weights still target the same $\pi_\alpha$.
 
 ## 9. Relationship to the baseline samplers
 
 The repository also includes two baselines built on the same prompt handling and cached decode utilities:
 
-- `GreedySampler`: always chooses `argmax_v p_θ(v | x, y_<t)`.
+- `GreedySampler`: always chooses $\operatorname*{argmax}_v \, p_\theta(v \mid x, y_{<t})$.
 - `StochasticSampler`: samples directly from the base-model token distribution, optionally with temperature.
 
 These are useful controls because they separate the effect of Power-SMC’s sequence-level correction from ordinary token-level decoding decisions.
@@ -153,7 +186,7 @@ Included:
 - exact Power-SMC importance updates,
 - systematic resampling,
 - ESS diagnostics,
-- optional `α`-ramping,
+- optional $\alpha$-ramping,
 - cache-safe ancestry reordering for Hugging Face models,
 - baseline greedy and stochastic samplers using the same model wrapper.
 
