@@ -303,7 +303,12 @@ class SamplerLM(lm_eval.api.model.LM):
         output = self._sampler.generate(
             context, max_new_tokens=max_gen_toks, seed=self._next_seed()
         )
-        generated = output.text
+        # Decode directly from token IDs to preserve leading whitespace.
+        # BaseSampler.decode_token_ids applies .strip() which destroys
+        # indentation critical for code generation tasks like HumanEval.
+        generated = self._tokenizer.decode(
+            output.generated_token_ids, skip_special_tokens=True
+        )
 
         # Truncate at first stop sequence
         for stop_seq in until:
