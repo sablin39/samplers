@@ -7,6 +7,8 @@ from typing import Any, Callable, Sequence
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
+from samplers.cache import BaseCache
+
 
 PromptLike = str | Sequence[dict[str, Any]]
 
@@ -136,14 +138,17 @@ class BaseSampler(ABC):
         input_ids: torch.LongTensor,
         *,
         attention_mask: torch.Tensor | None = None,
-        past_key_values: Any = None,
+        cache: BaseCache | None = None,
     ) -> Any:
         model_inputs: dict[str, Any] = {"input_ids": input_ids, "use_cache": True}
-        if attention_mask is not None and past_key_values is None:
+        if attention_mask is not None and (cache is None or not cache):
             model_inputs["attention_mask"] = attention_mask
-        if past_key_values is not None:
-            model_inputs["past_key_values"] = past_key_values
-        return self.model(**model_inputs)
+        if cache and cache.past_key_values is not None:
+            model_inputs["past_key_values"] = cache.past_key_values
+        outputs = self.model(**model_inputs)
+        if cache is not None:
+            cache.update(outputs)
+        return outputs
 
     def _generate_single_path(
         self,
@@ -161,7 +166,7 @@ class BaseSampler(ABC):
             attention_mask = attention_mask.to(self.device)
 
         generator = self.make_generator(seed)
-        past_key_values = None
+        cache = BaseCache(self.model)
         current_input_ids = input_ids
         selected_token_ids: list[int] = []
         selected_log_probs: list[float] = []
@@ -171,9 +176,8 @@ class BaseSampler(ABC):
                 outputs = self._forward_next(
                     current_input_ids,
                     attention_mask=attention_mask,
-                    past_key_values=past_key_values,
+                    cache=cache,
                 )
-                past_key_values = outputs.past_key_values
                 logits = outputs.logits[:, -1, :].float()
                 next_token = token_selector(logits, generator).view(1, 1)
                 next_log_prob = torch.log_softmax(logits, dim=-1).gather(1, next_token)

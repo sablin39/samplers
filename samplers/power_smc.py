@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
-
 import torch
 
 from samplers.base import BaseSampler, PromptLike, SamplerOutput
+from samplers.cache import BaseCache
 
 
 def systematic_resample(
@@ -24,45 +22,6 @@ def systematic_resample(
     cumulative = torch.cumsum(normalized_weights, dim=0)
     cumulative[-1] = 1.0
     return torch.searchsorted(cumulative, positions, right=False).long()
-
-
-def reorder_cache(model: Any, past_key_values: Any, ancestors: torch.LongTensor) -> Any:
-    if past_key_values is None:
-        return None
-
-    if hasattr(model, "_reorder_cache"):
-        reordered = model._reorder_cache(past_key_values, ancestors)
-        return past_key_values if reordered is None else reordered
-
-    if hasattr(past_key_values, "reorder_cache"):
-        past_key_values.reorder_cache(ancestors)
-        return past_key_values
-
-    if hasattr(past_key_values, "batch_select_indices"):
-        past_key_values.batch_select_indices(ancestors)
-        return past_key_values
-
-    return _recursive_index_select(past_key_values, ancestors)
-
-
-def _recursive_index_select(value: Any, ancestors: torch.LongTensor) -> Any:
-    if isinstance(value, torch.Tensor):
-        if value.shape[0] != ancestors.shape[0]:
-            return value
-        return value.index_select(0, ancestors)
-    if isinstance(value, tuple):
-        return tuple(_recursive_index_select(item, ancestors) for item in value)
-    if isinstance(value, list):
-        return [_recursive_index_select(item, ancestors) for item in value]
-    if isinstance(value, Mapping):
-        return type(value)((key, _recursive_index_select(item, ancestors)) for key, item in value.items())
-    if hasattr(value, "__dict__"):
-        cloned = value.__class__.__new__(value.__class__)
-        cloned.__dict__.update(
-            {key: _recursive_index_select(item, ancestors) for key, item in value.__dict__.items()}
-        )
-        return cloned
-    return value
 
 
 class PowerSMCSampler(BaseSampler):
@@ -124,7 +83,7 @@ class PowerSMCSampler(BaseSampler):
         generator = self.make_generator(seed)
         alpha_schedule = self.build_alpha_schedule(max_new_tokens)
 
-        past_key_values = None
+        cache = BaseCache(self.model)
         current_input_ids = repeated_prompt_ids
         generated_ids = torch.empty((self.num_particles, 0), dtype=torch.long, device=self.device)
         done = torch.zeros(self.num_particles, dtype=torch.bool, device=self.device)
@@ -138,9 +97,8 @@ class PowerSMCSampler(BaseSampler):
                 outputs = self._forward_next(
                     current_input_ids,
                     attention_mask=repeated_attention_mask,
-                    past_key_values=past_key_values,
+                    cache=cache,
                 )
-                past_key_values = outputs.past_key_values
                 repeated_attention_mask = None
 
                 logits = outputs.logits[:, -1, :].float()
@@ -193,7 +151,7 @@ class PowerSMCSampler(BaseSampler):
                     done = done.index_select(0, ancestors)
                     log_prefix_probabilities = log_prefix_probabilities.index_select(0, ancestors)
                     current_input_ids = current_input_ids.index_select(0, ancestors)
-                    past_key_values = reorder_cache(self.model, past_key_values, ancestors)
+                    cache.reorder(ancestors)
                     log_weights.zero_()
                     resample_steps.append(step + 1)
 
