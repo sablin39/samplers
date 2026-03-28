@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from samplers.base import BaseSampler, PromptLike, SamplerOutput
+from samplers.base import BaseSampler, SamplerOutput
 from samplers.cache import BaseCache
 
 
@@ -64,33 +64,39 @@ class PowerSMCSampler(BaseSampler):
 
     def generate(
         self,
-        prompt: PromptLike,
+        input_ids: torch.Tensor,
         *,
+        attention_mask: torch.Tensor | None = None,
         max_new_tokens: int = 64,
         seed: int | None = None,
     ) -> SamplerOutput:
-        rendered_prompt, encoded = self.encode_prompt(prompt)
-        prompt_input_ids = encoded["input_ids"].to(self.device)
-        attention_mask = encoded.get("attention_mask")
+        prompt_input_ids = input_ids.to(self.device)
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.device)
 
-        repeated_prompt_ids = prompt_input_ids.repeat(self.num_particles, 1)
+        repeated_prompt_ids = prompt_input_ids.expand(self.num_particles, -1)
         repeated_attention_mask = None
         if attention_mask is not None:
-            repeated_attention_mask = attention_mask.repeat(self.num_particles, 1)
+            repeated_attention_mask = attention_mask.expand(self.num_particles, -1)
 
         generator = self.make_generator(seed)
         alpha_schedule = self.build_alpha_schedule(max_new_tokens)
 
         cache = BaseCache(self.model)
         current_input_ids = repeated_prompt_ids
-        generated_ids = torch.empty((self.num_particles, 0), dtype=torch.long, device=self.device)
+        generated_ids = torch.full(
+            (self.num_particles, max_new_tokens),
+            self.eos_token_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        gen_length = 0
         done = torch.zeros(self.num_particles, dtype=torch.bool, device=self.device)
         log_weights = torch.zeros(self.num_particles, dtype=torch.float64, device=self.device)
         log_prefix_probabilities = torch.zeros(self.num_particles, dtype=torch.float64, device=self.device)
         ess_history: list[float] = []
         resample_steps: list[int] = []
+        normalized_weights = self._normalized_weights(log_weights)
 
         with torch.inference_mode():
             for step in range(max_new_tokens):
@@ -122,7 +128,8 @@ class PowerSMCSampler(BaseSampler):
                         generator=generator,
                     ).squeeze(-1)
 
-                generated_ids = torch.cat([generated_ids, sampled_tokens.unsqueeze(-1)], dim=1)
+                generated_ids[:, step] = sampled_tokens
+                gen_length = step + 1
                 chosen_tokens = sampled_tokens.unsqueeze(-1)
                 chosen_base_log_probs = base_log_probs.gather(1, chosen_tokens).squeeze(-1).to(torch.float64)
                 chosen_proposal_log_probs = proposal_log_probs.gather(1, chosen_tokens).squeeze(-1).to(torch.float64)
@@ -155,21 +162,16 @@ class PowerSMCSampler(BaseSampler):
                     log_weights.zero_()
                     resample_steps.append(step + 1)
 
-        final_weights = self._normalized_weights(log_weights)
+        generated_ids = generated_ids[:, :gen_length]
         selected_index = int(
-            torch.multinomial(final_weights.float(), num_samples=1, generator=generator).item()
+            torch.multinomial(normalized_weights.float(), num_samples=1, generator=generator).item()
         )
         selected_token_ids = self.trim_after_eos(generated_ids[selected_index].tolist())
-        selected_log_probability = float(log_prefix_probabilities[selected_index].item())
 
         return SamplerOutput(
             sampler_name=self.name,
-            prompt=self._prompt_text(prompt),
-            rendered_prompt=rendered_prompt,
-            prompt_token_ids=prompt_input_ids[0].tolist(),
-            generated_token_ids=selected_token_ids,
-            text=self.decode_token_ids(selected_token_ids),
-            log_probability=selected_log_probability,
+            generated_ids=torch.tensor(selected_token_ids, dtype=torch.long, device=self.device),
+            log_probability=float(log_prefix_probabilities[selected_index].item()),
             metadata={
                 "alpha": self.alpha,
                 "num_particles": self.num_particles,
@@ -178,7 +180,7 @@ class PowerSMCSampler(BaseSampler):
                 "alpha_schedule": alpha_schedule,
                 "ess_history": ess_history,
                 "resample_steps": resample_steps,
-                "final_particle_weights": final_weights.tolist(),
+                "final_particle_weights": normalized_weights.tolist(),
                 "selected_particle": selected_index,
             },
         )

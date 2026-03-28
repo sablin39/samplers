@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from samplers.base import BaseSampler, PromptLike, SamplerOutput
+from samplers.base import BaseSampler, SamplerOutput
 
 
 class GreedySampler(BaseSampler):
@@ -12,13 +12,15 @@ class GreedySampler(BaseSampler):
 
     def generate(
         self,
-        prompt: PromptLike,
+        input_ids: torch.Tensor,
         *,
+        attention_mask: torch.Tensor | None = None,
         max_new_tokens: int = 64,
         seed: int | None = None,
     ) -> SamplerOutput:
         return self._generate_single_path(
-            prompt,
+            input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             seed=seed,
             token_selector=self._select_next_token,
@@ -52,13 +54,15 @@ class StochasticSampler(BaseSampler):
 
     def generate(
         self,
-        prompt: PromptLike,
+        input_ids: torch.Tensor,
         *,
+        attention_mask: torch.Tensor | None = None,
         max_new_tokens: int = 64,
         seed: int | None = None,
     ) -> SamplerOutput:
         return self._generate_single_path(
-            prompt,
+            input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             seed=seed,
             token_selector=self._select_next_token,

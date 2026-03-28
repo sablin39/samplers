@@ -131,20 +131,35 @@ def run_diversity_experiment(args: argparse.Namespace) -> dict[str, Any]:
         prompt_results: list[dict[str, Any]] = []
 
         for prompt_index, prompt in enumerate(DEFAULT_PROMPTS):
+            rendered = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            encoded = tokenizer(rendered, return_tensors="pt")
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded.get("attention_mask")
+
             outputs = []
             for sample_index in range(args.samples_per_prompt):
                 seed = args.seed + prompt_index * 100 + sample_index
-                result = sampler.generate(prompt, max_new_tokens=args.max_new_tokens, seed=seed)
+                result = sampler.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=args.max_new_tokens,
+                    seed=seed,
+                )
+                text = tokenizer.decode(result.generated_ids.tolist(), skip_special_tokens=True)
                 outputs.append(
                     {
                         "seed": seed,
-                        "text": result.text,
+                        "text": text,
                         "num_generated_tokens": result.num_generated_tokens,
                         "log_probability": result.log_probability,
                         "metadata": compact_metadata(result.metadata),
                     }
                 )
-                all_texts.append(result.text)
+                all_texts.append(text)
 
             prompt_texts = [item["text"] for item in outputs]
             prompt_results.append(

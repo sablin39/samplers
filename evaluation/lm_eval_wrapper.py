@@ -298,17 +298,12 @@ class SamplerLM(lm_eval.api.model.LM):
         max_ctx = self._max_length - max_gen_toks
         if max_ctx > 0 and len(context_ids) > max_ctx:
             context_ids = context_ids[-max_ctx:]
-            context = self._tok_decode(context_ids)
 
+        input_ids = torch.tensor([context_ids], device=self._device)
         output = self._sampler.generate(
-            context, max_new_tokens=max_gen_toks, seed=self._next_seed()
+            input_ids, max_new_tokens=max_gen_toks, seed=self._next_seed()
         )
-        # Decode directly from token IDs to preserve leading whitespace.
-        # BaseSampler.decode_token_ids applies .strip() which destroys
-        # indentation critical for code generation tasks like HumanEval.
-        generated = self._tokenizer.decode(
-            output.generated_token_ids, skip_special_tokens=True
-        )
+        generated = self._tok_decode(output.generated_ids.tolist())
 
         # Truncate at first stop sequence
         for stop_seq in until:
@@ -335,7 +330,7 @@ def _build_sampler(
 
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     common: dict[str, Any] = dict(
-        model=model, tokenizer=tokenizer, device=device, use_chat_template=False
+        model=model, tokenizer=tokenizer, device=device
     )
 
     name = args.sampler
