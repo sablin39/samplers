@@ -168,6 +168,16 @@ class PowerSMCSampler(BaseSampler):
         )
         selected_token_ids = self.trim_after_eos(generated_ids[selected_index].tolist())
 
+        particles = []
+        for i in range(self.num_particles):
+            trimmed_ids = self.trim_after_eos(generated_ids[i].tolist())
+            particles.append({
+                "particle_index": i,
+                "generated_token_ids": trimmed_ids,
+                "weight": float(normalized_weights[i].item()),
+                "log_probability": float(log_prefix_probabilities[i].item()),
+            })
+
         return SamplerOutput(
             sampler_name=self.name,
             generated_ids=torch.tensor(selected_token_ids, dtype=torch.long, device=self.device),
@@ -182,6 +192,7 @@ class PowerSMCSampler(BaseSampler):
                 "resample_steps": resample_steps,
                 "final_particle_weights": normalized_weights.tolist(),
                 "selected_particle": selected_index,
+                "particles": particles,
             },
         )
 
